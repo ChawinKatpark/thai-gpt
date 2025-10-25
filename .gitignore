@@ -1,0 +1,11 @@
+# Ignore dataset and large files
+summaries/
+*.pt
+*.zip
+*.txt
+
+# Ignore temporary or notebook files
+__pycache__/
+*.ipynb_checkpoints/
+*.log
+*.tmp
