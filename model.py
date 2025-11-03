@@ -2,10 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ============================================================
-# Basic Configurable Parameters
-# ============================================================
-
+# Parameters
 class GPTConfig:
     def __init__(self,
                  vocab_size,
@@ -21,11 +18,7 @@ class GPTConfig:
         self.n_layer = n_layer
         self.dropout = dropout
 
-
-# ============================================================
 # Attention Head
-# ============================================================
-
 class Head(nn.Module):
     """One self-attention head"""
 
@@ -54,11 +47,7 @@ class Head(nn.Module):
         out = wei @ v      # (B, T, head_size)
         return out
 
-
-# ============================================================
 # Multi-Head Attention
-# ============================================================
-
 class MultiHeadAttention(nn.Module):
     """Multiple self-attention heads in parallel"""
 
@@ -79,10 +68,7 @@ class MultiHeadAttention(nn.Module):
         return out
 
 
-# ============================================================
 # FeedForward Layer
-# ============================================================
-
 class FeedForward(nn.Module):
     """Simple linear layer followed by non-linearity"""
 
@@ -98,11 +84,7 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
-# ============================================================
 # Transformer Block
-# ============================================================
-
 class Block(nn.Module):
     """Transformer block: communication followed by computation"""
 
@@ -118,11 +100,7 @@ class Block(nn.Module):
         x = x + self.ffwd(self.ln2(x)) # residual connection 2
         return x
 
-
-# ============================================================
 # GPT Model
-# ============================================================
-
 class GPTLanguageModel(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()

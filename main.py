@@ -1,0 +1,272 @@
+#This is what i used in Google Colab (in sequence)
+#to train the data, please make a folder in your google drive named "thai_gpt"
+
+#uncomment this
+#!git clone https://github.com/ChawinKatpark/thai-gpt.git
+#%cd thai-gpt
+#!pip install -r requirements.txt
+
+import torch
+print("Device:", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+x = torch.randn(10000, 10000).to("cuda")
+y = torch.matmul(x, x)
+print("✅ GPU works! Result:", y[0][0].item())
+
+#uncomment this as well
+#from google.colab import drive
+#drive.mount('/content/drive')
+#%cd /content/drive/MyDrive/thai_gpt
+
+import torch
+train_data, val_data = torch.load("data_thai_gpt.pt")
+print("✅ Data loaded:", train_data.shape, val_data.shape)
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from tqdm.notebook import tqdm
+import os
+import json
+from datetime import datetime
+from google.colab import drive
+import sys
+import itertools
+import re
+
+# Add the directory containing model.py to the system path
+sys.path.append('/content/thai-gpt')
+from model import GPTLanguageModel, GPTConfig
+
+
+# Mount Drive
+drive.mount('/content/drive', force_remount=True)
+save_dir = "/content/drive/MyDrive/thai_gpt/checkpoints"
+os.makedirs(save_dir, exist_ok=True)
+print(f"💾 Checkpoints will be saved to: {save_dir}")
+
+
+# Dataset Class
+class CharDataset(Dataset):
+    def __init__(self, data, block_size):
+        self.data = data
+        self.block_size = block_size
+    def __len__(self):
+        return len(self.data) - self.block_size
+    def __getitem__(self, idx):
+        x = self.data[idx:idx + self.block_size]
+        y = self.data[idx + 1:idx + 1 + self.block_size]
+        return x, y
+
+# Config
+block_size = 128
+batch_size = 32
+max_iters = 100000
+eval_interval = 2000
+checkpoint_interval = 4000
+learning_rate = 3e-4
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"you use device: {device}")
+
+# Load Data
+train_data, val_data = torch.load("/content/drive/MyDrive/thai_gpt/data_thai_gpt.pt")
+train_dataset = CharDataset(train_data, block_size)
+val_dataset = CharDataset(val_data, block_size)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+vocab_size = 30000
+
+# Model + Optimizer
+config = GPTConfig(vocab_size, block_size, n_embd=128, n_head=4, n_layer=4, dropout=0.1)
+model = GPTLanguageModel(config).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+# Resume if checkpoint exists (fix: numerical sorting)
+latest_ckpt = None
+step_numbers = []
+
+for file in os.listdir(save_dir):
+    match = re.search(r"step(\d+)\.pt", file)
+    if match:
+        step_numbers.append((int(match.group(1)), file))
+
+if step_numbers:
+    step_numbers.sort()
+    latest_ckpt = os.path.join(save_dir, step_numbers[-1][1])
+
+start_step = 0
+if latest_ckpt:
+    print(f"🔄 Loading checkpoint {latest_ckpt}")
+    ckpt = torch.load(latest_ckpt, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    start_step = ckpt["step"] + 1
+    print(f"✅ Resumed from step {start_step}")
+else:
+    print("🆕 No checkpoint found. Starting fresh training.")
+
+# Evaluation Function (used only at the end)
+@torch.no_grad()
+def evaluate_val():
+    model.eval()
+    losses = []
+    for xb, yb in tqdm(val_loader, desc="🔍 Eval", leave=False):
+        xb, yb = xb.to(device), yb.to(device)
+        _, loss = model(xb, yb)
+        losses.append(loss.item())
+    model.train()
+    return sum(losses) / len(losses)
+
+# Train Loop
+log_file = os.path.join(save_dir, "training_log.jsonl")
+progress = tqdm(range(start_step, max_iters), desc="Training", position=0, leave=True)
+
+# Infinite iterator to avoid StopIteration
+train_iter = iter(itertools.cycle(train_loader))
+
+for step in progress:
+    xb, yb = next(train_iter)
+    xb, yb = xb.to(device), yb.to(device)
+
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+    progress.set_postfix({"loss": f"{loss.item():.4f}"})
+
+    # Save checkpoint periodically
+    if step > 0 and step % checkpoint_interval == 0:
+        ckpt_path = os.path.join(save_dir, f"thai_gpt_model_step{step}.pt")
+        torch.save({
+            "step": step,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+        }, ckpt_path)
+        # Log progress
+        entry = {
+            "time": datetime.now().isoformat(),
+            "step": step,
+            "train_loss": float(loss.item())
+        }
+        with open(log_file, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+# Evaluate once at the end (prevent short lifetime GPU)
+val_loss = evaluate_val()
+entry = {
+    "time": datetime.now().isoformat(),
+    "step": max_iters,
+    "train_loss": float(loss.item()),
+    "val_loss": float(val_loss),
+}
+with open(log_file, "a") as f:
+    f.write(json.dumps(entry) + "\n")
+
+print(f"\n🧾 Final step {max_iters}: train {loss.item():.4f}, val {val_loss:.4f}")
+
+final_ckpt_path = os.path.join(save_dir, f"thai_gpt_model_final_step{max_iters}.pt")
+torch.save({
+    "step": max_iters,
+    "model": model.state_dict(),
+    "optimizer": optimizer.state_dict(),
+}, final_ckpt_path)
+print(f"Saved final checkpoint at {final_ckpt_path}")
+
+print("Training complete!")
+
+import torch
+from transformers import AutoTokenizer
+from model import GPTLanguageModel, GPTConfig
+import os
+import re
+
+# Load Tokenizer (same as during training)
+tokenizer = AutoTokenizer.from_pretrained("airesearch/wangchanberta-base-att-spm-uncased")
+
+# Load Model Configuration
+device = "cuda" if torch.cuda.is_available() else "cpu"
+vocab_size = 30000  # same as training config
+
+config = GPTConfig(
+    vocab_size=vocab_size,
+    block_size=128,
+    n_embd=128,
+    n_head=4,
+    n_layer=4,
+    dropout=0.1,
+)
+
+# Find the Latest Checkpoint
+save_dir = "/content/drive/MyDrive/thai_gpt/checkpoints"
+
+def extract_step(filename):
+    match = re.search(r"step(\d+)", filename)
+    return int(match.group(1)) if match else -1
+
+ckpts = [f for f in os.listdir(save_dir) if f.endswith(".pt") and "step" in f]
+if not ckpts:
+    raise FileNotFoundError(f"No checkpoint files found in {save_dir}")
+
+latest_ckpt = max(ckpts, key=extract_step)
+ckpt_path = os.path.join(save_dir, latest_ckpt)
+
+# Load Model and Weights
+model = GPTLanguageModel(config).to(device)
+ckpt = torch.load(ckpt_path, map_location=device)
+model.load_state_dict(ckpt["model"])
+model.eval()
+print(f"✅ Loaded model from: {ckpt_path}")
+
+# Custom Text Generation Function
+@torch.no_grad()
+def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.9, top_k=50, top_p=0.9):
+    """
+    Custom text generation loop for your GPTLanguageModel.
+    """
+    model.eval()
+    device = next(model.parameters()).device
+
+    # Encode the prompt into token IDs
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+
+    for _ in range(max_new_tokens):
+        # Keep only the last block_size tokens
+        input_cond = input_ids[:, -config.block_size:]
+
+        # Forward pass
+        logits, _ = model(input_cond)
+
+        # Focus on the last token's logits
+        logits = logits[:, -1, :] / temperature
+
+        # Top-k and Top-p sampling (optional)
+        if top_k is not None:
+            top_k = min(top_k, logits.size(-1))
+            values, indices = torch.topk(logits, top_k)
+            logits[logits < values[:, [-1]]] = -float("Inf")
+
+        if top_p is not None:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_logits[sorted_indices_to_remove] = -float("Inf")
+
+        # Convert logits to probabilities
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+
+        # Sample the next token
+        next_token = torch.multinomial(probs, num_samples=1)
+
+        # Append next token to the sequence
+        input_ids = torch.cat((input_ids, next_token), dim=1)
+
+    # Decode the entire sequence into text
+    return tokenizer.decode(input_ids[0], skip_special_tokens=True)
+
+# Try Generating Text
+prompt = ""
+generated_text = generate_text(model, tokenizer, prompt, max_new_tokens=100)
+
+print("\n📝 Prompt:", prompt)
+print("💬 Generated:", generated_text)
+
